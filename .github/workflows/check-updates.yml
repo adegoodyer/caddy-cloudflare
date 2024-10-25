@@ -122,12 +122,22 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
+      - name: Install crane
+        run: |
+          CRANE_VERSION=v0.19.0
+          wget -qO- https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz | \
+          sudo tar zxvf - -C /usr/local/bin crane
+
       - name: Generate SBOM
         run: |
           syft /tmp/image.tar -o json=/tmp/sbom.json
           syft /tmp/image.tar -o spdx-json=/tmp/sbom.spdx.json
           syft /tmp/image.tar -o cyclonedx-json=/tmp/sbom.cyclonedx.json
           syft /tmp/image.tar -o table=/tmp/sbom.txt
+
+      # Create directory for results
+      - name: Create results directory
+        run: mkdir -p /tmp/results
 
       - name: Create platform-specific images
         run: |

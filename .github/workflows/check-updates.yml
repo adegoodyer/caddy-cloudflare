@@ -117,6 +117,7 @@ jobs:
         run: |
           grype /tmp/image.tar -o json > /tmp/vulnerabilities.json
           grype /tmp/image.tar -o table > /tmp/vulnerabilities.txt
+          grype /tmp/image.tar -o sarif > /tmp/vulnerabilities.sarif
 
           # Check for critical vulnerabilities
           CRITICAL_COUNT=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' /tmp/vulnerabilities.json)
@@ -168,9 +169,9 @@ jobs:
               repo: context.repo.repo,
               title: '🚨 Critical Vulnerabilities Detected in Latest Build',
               body: `Critical vulnerabilities were found in the latest build (v${{ needs.check-update.outputs.new_version }}).
-              
+
               Please check the [latest release](https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/v${{ needs.check-update.outputs.new_version }}) for details.
-              
+
               Number of critical vulnerabilities: ${process.env.critical_count}`
             });
 

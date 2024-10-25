@@ -145,6 +145,8 @@ jobs:
           # Load the OCI image into Docker
           docker load -i /tmp/image.tar
 
+          docker images --format "{{.ID}}: {{.Repository}}:{{.Tag}}"
+
           # Extract image ID based on platform tags (adjust for amd64 and arm64)
           IMAGE_ID_AMD64=$(docker images --quiet --filter "label=org.opencontainers.image.architecture=amd64" --filter "label=org.opencontainers.image.version=${{ needs.check-update.outputs.new_version }}")
           IMAGE_ID_ARM64=$(docker images --quiet --filter "label=org.opencontainers.image.architecture=arm64" --filter "label=org.opencontainers.image.version=${{ needs.check-update.outputs.new_version }}")

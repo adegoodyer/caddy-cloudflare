@@ -113,10 +113,16 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Use the OCI exporter for local image
           outputs: |
             type=registry,push=true
             type=oci,dest=/tmp/image.tar
+
+      - name: Validate OCI export
+        run: |
+          if [ ! -f /tmp/image.tar ]; then
+            echo "Error: /tmp/image.tar not found."
+            exit 1
+          fi
 
       - name: Install Syft
         run: |
@@ -135,7 +141,6 @@ jobs:
           syft /tmp/image.tar -o cyclonedx-json=/tmp/sbom.cyclonedx.json
           syft /tmp/image.tar -o table=/tmp/sbom.txt
 
-      # Create directory for results
       - name: Create results directory
         run: mkdir -p /tmp/results
 
@@ -143,9 +148,7 @@ jobs:
         run: |
           mkdir -p /tmp/images
           # Load the OCI image into Docker
-          docker load -i /tmp/image.tar
-
-          docker images --format "{{.ID}}: {{.Repository}}:{{.Tag}}"
+          docker load < /tmp/image.tar
 
           # Extract image ID based on platform tags (adjust for amd64 and arm64)
           IMAGE_ID_AMD64=$(docker images --quiet --filter "label=org.opencontainers.image.architecture=amd64" --filter "label=org.opencontainers.image.version=${{ needs.check-update.outputs.new_version }}")

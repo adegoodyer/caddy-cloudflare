@@ -143,9 +143,8 @@ jobs:
         run: |
           mkdir -p /tmp/images
           # Extract the OCI image and create platform-specific tarballs
-          # Corrected crane flatten command syntax
-          crane flatten --platform=linux/amd64 --output=/tmp/images/image-amd64.tar /tmp/image.tar
-          crane flatten --platform=linux/arm64 --output=/tmp/images/image-arm64.tar /tmp/image.tar
+          crane mutate --platform=linux/amd64 /tmp/image.tar > /tmp/images/image-amd64.tar
+          crane mutate --platform=linux/arm64 /tmp/image.tar > /tmp/images/image-arm64.tar
 
       - name: Install Grype
         run: |

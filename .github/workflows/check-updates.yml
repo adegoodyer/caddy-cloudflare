@@ -88,8 +88,10 @@ jobs:
       - name: Log into Docker Hub
         uses: docker/login-action@v3
         with:
+          registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
+          logout: true
 
       - name: Extract metadata for Docker
         id: meta
@@ -105,13 +107,16 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: type=docker,dest=/tmp/image.tar
+          # Use the OCI exporter for local image
+          outputs: |
+            type=registry,push=true
+            type=oci,dest=/tmp/image.tar
 
       - name: Install Syft
         run: |
@@ -124,18 +129,38 @@ jobs:
           syft /tmp/image.tar -o cyclonedx-json=/tmp/sbom.cyclonedx.json
           syft /tmp/image.tar -o table=/tmp/sbom.txt
 
+      - name: Create platform-specific images
+        run: |
+          mkdir -p /tmp/images
+          # Extract the OCI image and create platform-specific tarballs
+          crane flatten /tmp/image.tar -f /tmp/images/image-amd64.tar --platform linux/amd64
+          crane flatten /tmp/image.tar -f /tmp/images/image-arm64.tar --platform linux/arm64
+
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Scan for vulnerabilities
         run: |
-          grype /tmp/image.tar -o json > /tmp/vulnerabilities.json
-          grype /tmp/image.tar -o table > /tmp/vulnerabilities.txt
-          grype /tmp/image.tar -o sarif > /tmp/vulnerabilities.sarif
+          # Scan AMD64 image
+          echo "Scanning AMD64 image..."
+          grype /tmp/images/image-amd64.tar -o json > /tmp/results/vulnerabilities-amd64.json
+          grype /tmp/images/image-amd64.tar -o table > /tmp/results/vulnerabilities-amd64.txt
+          grype /tmp/images/image-amd64.tar -o sarif > /tmp/results/vulnerabilities-amd64.sarif
 
-          # Check for critical vulnerabilities
-          CRITICAL_COUNT=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' /tmp/vulnerabilities.json)
+          # Scan ARM64 image
+          echo "Scanning ARM64 image..."
+          grype /tmp/images/image-arm64.tar -o json > /tmp/results/vulnerabilities-arm64.json
+          grype /tmp/images/image-arm64.tar -o table > /tmp/results/vulnerabilities-arm64.txt
+          grype /tmp/images/image-arm64.tar -o sarif > /tmp/results/vulnerabilities-arm64.sarif
+
+          # Combine results (you might want to customize this based on your needs)
+          jq -s '.[0].matches + .[1].matches | unique_by(.vulnerability.id) | {matches: .}' \
+            /tmp/results/vulnerabilities-amd64.json \
+            /tmp/results/vulnerabilities-arm64.json > /tmp/results/vulnerabilities.json
+
+          # Count critical vulnerabilities
+          CRITICAL_COUNT=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' /tmp/results/vulnerabilities.json)
           echo "Critical vulnerabilities found: $CRITICAL_COUNT"
           echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_ENV
 
@@ -156,7 +181,15 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: /tmp/vulnerabilities.sarif
+          sarif_file: /tmp/results/vulnerabilities-amd64.sarif
+          category: grype-results-amd64
+
+      - name: Upload ARM64 SARIF file
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: /tmp/results/vulnerabilities-arm64.sarif
+          category: grype-results-arm64
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

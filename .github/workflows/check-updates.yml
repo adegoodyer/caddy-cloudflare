@@ -47,6 +47,7 @@ jobs:
     needs: check-update
     if: needs.check-update.outputs.has_update == 'true'
     runs-on: ubuntu-latest
+    environment: prod
     permissions:
       contents: write
       packages: write

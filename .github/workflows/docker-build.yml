@@ -1,0 +1,127 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/caddy-cloudflare
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          outputs: type=docker,dest=/tmp/image.tar
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM
+        run: |
+          syft /tmp/image.tar -o json=/tmp/sbom.json
+          syft /tmp/image.tar -o spdx-json=/tmp/sbom.spdx.json
+          syft /tmp/image.tar -o cyclonedx-json=/tmp/sbom.cyclonedx.json
+          syft /tmp/image.tar -o table=/tmp/sbom.txt
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan for vulnerabilities
+        run: |
+          grype /tmp/image.tar -o json > /tmp/vulnerabilities.json
+          grype /tmp/image.tar -o table > /tmp/vulnerabilities.txt
+
+          # Check for critical vulnerabilities
+          CRITICAL_COUNT=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' /tmp/vulnerabilities.json)
+          echo "Critical vulnerabilities found: $CRITICAL_COUNT"
+          echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_ENV
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: /tmp/vulnerabilities.sarif
+
+      - name: Push Docker image
+        if: github.event_name != 'pull_request' && env.critical_count == 0
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/') && env.critical_count == 0
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            /tmp/sbom.json
+            /tmp/sbom.spdx.json
+            /tmp/sbom.cyclonedx.json
+            /tmp/sbom.txt
+            /tmp/vulnerabilities.json
+            /tmp/vulnerabilities.txt
+          body: |
+            Release for ${{ github.ref_name }}
+
+            ## Security Scan Results
+            ```
+            $(cat /tmp/vulnerabilities.txt)
+            ```
+
+            ## Software Bill of Materials (SBOM)
+            ```
+            $(cat /tmp/sbom.txt)
+            ```

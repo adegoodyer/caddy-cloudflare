@@ -1,0 +1,181 @@
+name: Check Caddy Updates
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # Runs every 6 hours
+  workflow_dispatch: # Allow manual trigger
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/caddy-cloudflare
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.check-version.outputs.new_version }}
+      current_version: ${{ steps.check-version.outputs.current_version }}
+      has_update: ${{ steps.check-version.outputs.has_update }}
+
+    steps:
+      - name: Get latest Caddy version
+        id: check-version
+        run: |
+          # Get the latest stable Caddy version from Docker Hub
+          LATEST_VERSION=$(curl -s "https://hub.docker.com/v2/repositories/library/caddy/tags?page_size=100" | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+
+          # Get our current version
+          CURRENT_VERSION=$(curl -s "https://hub.docker.com/v2/repositories/${{ env.IMAGE_NAME }}/tags?page_size=100" | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+
+          # Default to 0.0.0 if no version exists
+          CURRENT_VERSION=${CURRENT_VERSION:-0.0.0}
+
+          echo "Latest Caddy version: $LATEST_VERSION"
+          echo "Current version: $CURRENT_VERSION"
+
+          # Compare versions
+          if [ "$LATEST_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+            echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "has_update=true" >> $GITHUB_OUTPUT
+          else
+            echo "No update needed"
+            echo "has_update=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-scan:
+    needs: check-update
+    if: needs.check-update.outputs.has_update == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create and push new tag
+        run: |
+          NEW_VERSION=${{ needs.check-update.outputs.new_version }}
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git tag "v${NEW_VERSION}"
+          git push origin "v${NEW_VERSION}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.check-update.outputs.new_version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.check-update.outputs.new_version }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/image.tar
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM
+        run: |
+          syft /tmp/image.tar -o json=/tmp/sbom.json
+          syft /tmp/image.tar -o spdx-json=/tmp/sbom.spdx.json
+          syft /tmp/image.tar -o cyclonedx-json=/tmp/sbom.cyclonedx.json
+          syft /tmp/image.tar -o table=/tmp/sbom.txt
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan for vulnerabilities
+        run: |
+          grype /tmp/image.tar -o json > /tmp/vulnerabilities.json
+          grype /tmp/image.tar -o table > /tmp/vulnerabilities.txt
+
+          # Check for critical vulnerabilities
+          CRITICAL_COUNT=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' /tmp/vulnerabilities.json)
+          echo "Critical vulnerabilities found: $CRITICAL_COUNT"
+          echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_ENV
+
+      - name: Generate Security Report Summary
+        run: |
+          echo "# Security Scan Results" > /tmp/security-summary.md
+          echo "## Vulnerability Summary" >> /tmp/security-summary.md
+          echo '```' >> /tmp/security-summary.md
+          cat /tmp/vulnerabilities.txt >> /tmp/security-summary.md
+          echo '```' >> /tmp/security-summary.md
+
+          echo -e "\n## Software Bill of Materials (SBOM)" >> /tmp/security-summary.md
+          echo '```' >> /tmp/security-summary.md
+          cat /tmp/sbom.txt >> /tmp/security-summary.md
+          echo '```' >> /tmp/security-summary.md
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: /tmp/vulnerabilities.sarif
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-update.outputs.new_version }}
+          name: Release v${{ needs.check-update.outputs.new_version }}
+          body_path: /tmp/security-summary.md
+          files: |
+            /tmp/sbom.json
+            /tmp/sbom.spdx.json
+            /tmp/sbom.cyclonedx.json
+            /tmp/sbom.txt
+            /tmp/vulnerabilities.json
+            /tmp/vulnerabilities.txt
+          draft: false
+          prerelease: false
+
+      - name: Send Notification on Critical Vulnerabilities
+        if: env.critical_count > 0
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Critical Vulnerabilities Detected in Latest Build',
+              body: `Critical vulnerabilities were found in the latest build (v${{ needs.check-update.outputs.new_version }}).
+              
+              Please check the [latest release](https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/v${{ needs.check-update.outputs.new_version }}) for details.
+              
+              Number of critical vulnerabilities: ${process.env.critical_count}`
+            });
+
+      - name: Fail if Critical Vulnerabilities
+        if: env.critical_count > 0
+        run: |
+          echo "::error::Found ${critical_count} critical vulnerabilities"
+          exit 1

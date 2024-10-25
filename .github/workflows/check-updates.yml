@@ -111,6 +111,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CADDY_MODULE="github.com/caddy-dns/cloudflare"
           cache-from: type=gha
           cache-to: type=gha,mode=max
           outputs: |
@@ -150,7 +152,9 @@ jobs:
           # Load the OCI image into Docker
           docker load < /tmp/image.tar
 
-          docker images --all
+          # debugging
+          docker images --filter "reference=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:*"
+
 
           # Extract image ID based on platform tags (adjust for amd64 and arm64)
           IMAGE_ID_AMD64=$(docker images --quiet --filter "label=org.opencontainers.image.architecture=amd64" --filter "label=org.opencontainers.image.version=${{ needs.check-update.outputs.new_version }}")
